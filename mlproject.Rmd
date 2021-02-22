@@ -1,0 +1,146 @@
+---
+title: "Coursera Machine Learning Project"
+author: "Pete Peters"
+date: "February 21, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'C:/Users/1086190270MIL/Desktop/machinelearn')
+set.seed(555)
+getwd()
+```
+
+```{r, warning=FALSE, results=FALSE, message=FALSE}
+# Load required packages.
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(corrplot)
+library(randomForest)
+library(ggplot2)
+library(rattle)
+```
+
+## Background
+Researchers are using fitness devices to collect a large amount of data about personal activity relatively inexpensively. People regularly quantify how much of a particular activity they do, but they rarely quantify how well they do it. Here we will use data captured using fitness accelerometers mounted to six individual's arm, forearm, and waist -  as well as the dumbell itself - to predict when an exercise is not completed properly. The six individuals performed the lifting movement properly (class A), throwing elbows to the front (B), lifting only halfway (C), lowering halfway (D), and throwing hips to the front. From this initial data, we seek to provide feedback regarding quality to others performing the exercise. More information on this experiment may be found at http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har  
+
+## Data
+
+```{r}
+setwd("C:/Users/1086190270MIL/Desktop/machinelearn")
+train <- read.csv("pml-training.csv", na.strings = c("NA", "", "#DIV/0!"), stringsAsFactors = TRUE)
+test <- read.csv("pml-testing.csv", na.strings = c("NA", "", "#DIV/0!"), stringsAsFactors = TRUE)
+```
+
+Training and testing data for this project were obtained via the links below. The training data consists of `r dim(train)[1]` observations with `r dim(train)[2]` features included. The test set includes only twenty observations with the same `r dim(test)[2]` features. The variable we will predict is named "classe" in the original data. This is a categorical variable which corresponds to the five exercise quality levels described above.
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+## Data Cleaning and Exploratory Analysis
+There are a number of missing datapoints, and many columns contain no data or the feature lacks any usable variance. Missing and error data were recoded as such, and irrelevant (no variance) features have been removed via the script below. Additionally, each accelerometer recorded a timestamp for each movement. Data pertaining to these stamps has been removed to retain only relevant information for the modeling effort. We have taken care to apply the same tidying steps to the test data as well. The resulting dataframe contains 19,622 observations and 54 features for prediction.
+
+```{r}
+#summary(train)
+
+limvar <- nearZeroVar(train, saveMetrics = TRUE)
+sum(limvar$nzv == TRUE) # 36 variables ID'd with no variance
+train <- train[, !limvar$nzv] # remove 36 variables
+test <- test[, !limvar$nzv]
+
+# remove columns with all missing data
+train <- train[, colSums(is.na(train)) == 0]
+test <- test[, colSums(is.na(test)) == 0]
+
+# remove timestamp columns, individuals, row numbers
+train <- train[, -c(1:5)]
+test <- test[, -c(1:5)]
+dim(train)
+```
+```{r figs, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:figs}Correlation Plot"}
+corrplot(cor(train[, -c(length(names(train)))]), method = "color", tl.cex = 0.5)
+```
+
+In the figure above, we see the relationship between each of the variables in the resulting dataframe. We could seek to reduce the number of variables fed to the model by performing a principle components analysis to reduce complexity and highly correlated features, but we chose to pursue a prediction algorithm first and then possibly return to the PCA if required.
+
+## Splitting Data into Training and Testing Sets
+The original data included twenty observations we will use to validate the chosen algorithm. To help decide on an appropriate approach, we split the training data into two sets and treat the original test data as a validation subset. After splitting the training set we have 13,737 observations in the training set and 5,885 for cross-validation.
+
+```{r}
+inTrain <- createDataPartition(train$classe, p = .7, list = FALSE)
+train2 <- train[inTrain, ]
+test2 <- train[-inTrain, ]
+```
+
+## Algorithm 1.
+Because we are working with a categorical dependant variable, a natural prediction algorithm is a decision tree. If you have a bunch of variables to predict an outcome, you can split each variable into groups and then evaluate the homogeneity within each group. You split again if necessary, or if you decide that they are split enough then you stop. They are easy to interpret and perform better in non-linear settings. Unfortunately, without pruning/cross-validation, you can overfit. Its also harder to assess uncertainty and the results may be inconsistent.
+
+The basic algorithm is outlined below.  
+    1. Start with all variables in one group
+    2. Find the variable/split that best separates the outcomes (you want two different homogeneous leaves)
+    3. Divide the data into two groups (leaves) on that split ("node")
+    4. Within each split, find the best variable/split that separates the outcomes
+    5. Continue until the groups are too small or sufficiently "pure"
+
+Note that below are two methods for generating the decision tree. The first uses the caret package and follows the classroom instruction. The accuracy on this algorithm was fairly low, so we reran the model using the rpart package and generated much more accurate predictions.
+```{r}
+# caret
+modFit <- train(classe ~., method = "rpart", data = train2)
+plot(modFit$finalModel, uniform = TRUE, main = "Classification Tree") #dendogram
+text(modFit$finalModel, use.n = TRUE, all = TRUE, cex = .8)
+```
+
+```{r}
+# predict new values
+pred <- predict(modFit, newdata = test2, type = "raw")
+confusionMatrix(test2$classe, pred)
+1 - as.numeric(confusionMatrix(test2$classe, pred)$overall[1])
+```
+
+Out of Sample error from the caret approach was roughly 43%. For some reason none of the "D" class movements were predicted in the test data. To compare, we used the `rpart()` command in the rpart package to create the tree.
+```{r}
+modFitb <- rpart(classe ~ ., data = train2, method="class")
+predb <- predict(modFitb, test2, type = "class")
+#confusionMatrix(test2$classe, predb)
+1 - as.numeric(confusionMatrix(test2$classe, predb)$overall[1])
+```
+
+Using the rpart package reduced out of sample error to about 20%, resulting in a much better approach than with caret. This is the model we will use. Below is a graphical representation of the resulting algorithm.
+
+```{r}
+# Plot the Decision Tree
+rpart.plot(modFitb, main="Classification Tree", extra=102, under=TRUE, faclen=0)
+```
+
+## Algorithm 2. 
+Another possible approach is to apply a Random Forest algorithm to predict exercise quality. The process is as follows:
+  1. Bootstrap samples, create decision trees
+  2. At each split, bootstrap variables (only a subset is considered)
+  3. Grow multiple trees and vote
+  
+Random forests are very accurate, but they take a long time, can increase overfitting, and interpreting them is hard. New predictions are run through each tree and you average the results. R's caret package is used below to generate the Random Forest algorithm.
+
+```{r}
+modFit2 <- train(classe~., data = train2, method = "rf", prox = FALSE, trControl = trainControl(method = "cv", 5), ntree = 50) # I kept the number of trees low due to computing resources available.
+# modFit # The initial model shows high accuracy in predictive value.
+
+# Predicting new values
+pred2 <- predict(modFit2, test2)
+confusionMatrix(test2$classe, pred2)
+1 - as.numeric(confusionMatrix(test2$classe, pred2)$overall[1])
+```
+
+The results above look very positive, with an accuracy over 99% and an out of sample error at around .34%. The random forest model is the way to go. Below, we predict the exercise using the validation data.
+
+```{r}
+predfinal <- predict(modFit2, test[, -54])
+predfinal
+```
+
+
+
+
+
+
